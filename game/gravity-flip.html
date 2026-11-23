@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gravity Flip — one prompt, one button</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #070714; height: 100%; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #070714; }
+  #hint {
+    position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    color: #8ef6ff; font: 600 15px/1.4 system-ui, sans-serif; letter-spacing: .12em;
+    text-transform: uppercase; opacity: .85; pointer-events: none; text-align: center;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+<div id="hint">Space / tap — flip gravity</div>
+<script>
+'use strict';
+// Gravity Flip: one prompt, one button.
+// The ship runs on its own. One tap flips gravity between floor and ceiling.
+// Dodge the spikes, collect the stars. Speed rises the longer you survive.
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const FLOOR = H - 56, CEIL = 56;
+const SHIP_X = 210, SHIP_R = 16;
+
+let state = 'ready'; // ready | run | over
+let gravity = 1;     // 1 = down (floor), -1 = up (ceiling)
+let shipY = FLOOR, shipVy = 0;
+let speed = 240, dist = 0, stars = 0, best = 0;
+let spikes = [], coins = [], parts = [], bgStars = [];
+let spawnT = 0, shake = 0, flash = 0;
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function reset() {
+  gravity = 1; shipY = FLOOR; shipVy = 0;
+  speed = 240; dist = 0; stars = 0;
+  spikes = []; coins = []; parts = [];
+  spawnT = 0; shake = 0; flash = 0;
+}
+function initBg() {
+  bgStars = [];
+  for (let i = 0; i < 90; i++) bgStars.push({ x: rand(0, W), y: rand(0, H), s: rand(0.5, 2), tw: rand(0, Math.PI * 2) });
+}
+initBg();
+
+function flip() {
+  if (state === 'ready') { state = 'run'; return; }
+  if (state === 'over') { reset(); state = 'run'; return; }
+  gravity = -gravity;
+  shipVy = gravity > 0 ? 520 : -520;
+  burst(SHIP_X, shipY, '#8ef6ff', 8);
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    parts.push({ x, y, vx: rand(-160, 160), vy: rand(-220, 60), life: rand(0.3, 0.7), max: 0.7, color, r: rand(1.5, 3.5) });
+  }
+}
+
+function spawnRow() {
+  // A spike row on one surface, sometimes both — but never both at the same
+  // x: the two spikes are staggered by 200px so there is always a safe
+  // surface to flip to.
+  const onFloor = Math.random() < 0.62;
+  const onCeil = !onFloor || Math.random() < 0.2;
+  if (onFloor) spikes.push({ x: W + 40, y: FLOOR, w: 34, h: 44, side: 1 });
+  if (onCeil) spikes.push({ x: W + 280, y: CEIL, w: 34, h: 44, side: -1 });
+  if (Math.random() < 0.75) {
+    // Stars sit in a lane the ship can actually reach: hugging the floor,
+    // hugging the ceiling, or mid-air for a flip arc.
+    const lane = Math.random();
+    const y = lane < 0.4 ? FLOOR - 20 : lane < 0.8 ? CEIL + 20 : rand(CEIL + 120, FLOOR - 120);
+    coins.push({ x: W + 60, y, r: 12, got: false, ph: rand(0, 6) });
+  }
+}
+
+function step(dt) {
+  if (state !== 'run') return;
+  speed = Math.min(520, speed + 5 * dt);
+  dist += speed * dt;
+  spawnT -= dt;
+  if (spawnT <= 0) { spawnRow(); spawnT = rand(0.8, 1.3) * (320 / speed); }
+
+  // Ship physics: arcs between surfaces on a flip.
+  shipVy += gravity * 2600 * dt;
+  shipY += shipVy * dt;
+  const target = gravity > 0 ? FLOOR : CEIL;
+  if ((gravity > 0 && shipY >= target) || (gravity < 0 && shipY <= target)) {
+    shipY = target; shipVy = 0;
+  }
+
+  for (const s of spikes) s.x -= speed * dt;
+  for (const c of coins) { c.x -= speed * dt; c.ph += dt * 4; }
+  spikes = spikes.filter(s => s.x > -60);
+  coins = coins.filter(c => c.x > -40 && !c.got);
+
+  // Star pickup.
+  for (const c of coins) {
+    const dx = c.x - SHIP_X, dy = c.y - shipY;
+    if (dx * dx + dy * dy < (c.r + SHIP_R) * (c.r + SHIP_R)) {
+      c.got = true; stars++;
+      burst(c.x, c.y, '#ffd166', 12);
+    }
+  }
+  // Spike hit: the ship's circle against the spike's box, shrunk a little
+  // so near-misses feel fair.
+  for (const s of spikes) {
+    const top = s.side === 1 ? s.y - s.h : s.y;
+    if (SHIP_X + SHIP_R - 4 > s.x && SHIP_X - SHIP_R + 4 < s.x + s.w &&
+        shipY + SHIP_R - 4 > top && shipY - SHIP_R + 4 < top + s.h) {
+      state = 'over'; shake = 14; flash = 1;
+      best = Math.max(best, Math.floor(dist / 10) + stars * 10);
+      burst(SHIP_X, shipY, '#ff4d6d', 26);
+      return;
+    }
+  }
+  // Particles.
+  for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
+  parts = parts.filter(p => p.life > 0);
+  shake = Math.max(0, shake - dt * 40);
+  flash = Math.max(0, flash - dt * 2.2);
+}
+
+function drawSpike(s) {
+  ctx.save();
+  ctx.fillStyle = '#ff4d6d';
+  ctx.shadowColor = '#ff4d6d'; ctx.shadowBlur = 18;
+  ctx.beginPath();
+  if (s.side === 1) {
+    ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + s.w / 2, s.y - s.h); ctx.lineTo(s.x + s.w, s.y);
+  } else {
+    ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + s.w / 2, s.y + s.h); ctx.lineTo(s.x + s.w, s.y);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-shake, shake) * 0.5, rand(-shake, shake) * 0.5);
+  ctx.fillStyle = '#070714'; ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  // Starfield.
+  for (const s of bgStars) {
+    ctx.globalAlpha = 0.35 + 0.3 * Math.sin(s.tw += 0.02);
+    ctx.fillStyle = '#bfe9ff';
+    ctx.fillRect(s.x, s.y, s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+
+  // Neon rails: floor and ceiling.
+  for (const [y, color] of [[FLOOR, '#22d3ee'], [CEIL, '#f472b6']]) {
+    ctx.strokeStyle = color; ctx.lineWidth = 3;
+    ctx.shadowColor = color; ctx.shadowBlur = 16;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = color; ctx.globalAlpha = 0.12;
+    ctx.fillRect(0, y + (y === FLOOR ? 3 : -3), W, y === FLOOR ? H - y : y);
+    ctx.globalAlpha = 1;
+  }
+
+  // Stars.
+  for (const c of coins) {
+    const bob = Math.sin(c.ph) * 4;
+    ctx.save();
+    ctx.translate(c.x, c.y + bob);
+    ctx.fillStyle = '#ffd166'; ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 16;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const r = i % 2 === 0 ? c.r : c.r * 0.45;
+      const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+      ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  for (const s of spikes) drawSpike(s);
+
+  // Ship: a neon arrow pointing along the run, flipping with gravity.
+  ctx.save();
+  ctx.translate(SHIP_X, shipY);
+  ctx.scale(1, gravity > 0 ? 1 : -1);
+  ctx.rotate(Math.max(-0.35, Math.min(0.35, shipVy / 2400)));
+  ctx.fillStyle = '#8ef6ff'; ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 22;
+  ctx.beginPath();
+  ctx.moveTo(20, 0); ctx.lineTo(-14, -13); ctx.lineTo(-6, 0); ctx.lineTo(-14, 13);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+
+  // Exhaust.
+  ctx.save();
+  ctx.fillStyle = '#f472b6'; ctx.shadowColor = '#f472b6'; ctx.shadowBlur = 14;
+  ctx.beginPath();
+  ctx.ellipse(SHIP_X - 18, shipY + (gravity > 0 ? 2 : -2), rand(8, 16), 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Particles.
+  for (const p of parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD.
+  ctx.fillStyle = '#e8fbff'; ctx.font = '700 26px system-ui, sans-serif';
+  ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 10;
+  const score = Math.floor(dist / 10) + stars * 10;
+  ctx.fillText('SCORE ' + score, 20, 40);
+  ctx.fillStyle = '#ffd166'; ctx.shadowColor = '#ffd166';
+  ctx.fillText('★ ' + stars, 20, 74);
+  ctx.shadowBlur = 0;
+
+  if (state === 'ready') {
+    ctx.fillStyle = '#e8fbff'; ctx.font = '800 44px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 24;
+    ctx.fillText('GRAVITY FLIP', W / 2, H / 2 - 30);
+    ctx.font = '600 20px system-ui, sans-serif'; ctx.shadowBlur = 8;
+    ctx.fillText('one button. one prompt. flip or die.', W / 2, H / 2 + 12);
+    ctx.fillText('SPACE / TAP to start', W / 2, H / 2 + 52);
+    ctx.textAlign = 'left'; ctx.shadowBlur = 0;
+  }
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(7,7,20,0.55)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ff4d6d'; ctx.font = '800 46px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.shadowColor = '#ff4d6d'; ctx.shadowBlur = 24;
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 20);
+    ctx.fillStyle = '#e8fbff'; ctx.font = '600 22px system-ui, sans-serif'; ctx.shadowBlur = 8;
+    ctx.fillText('score ' + (Math.floor(dist / 10) + stars * 10) + '   ·   best ' + best, W / 2, H / 2 + 22);
+    ctx.fillText('SPACE / TAP to run again', W / 2, H / 2 + 60);
+    ctx.textAlign = 'left'; ctx.shadowBlur = 0;
+  }
+  if (flash > 0) {
+    ctx.fillStyle = `rgba(255,77,109,${flash * 0.25})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flip(); }
+  if (e.code === 'KeyR' && state === 'over') { reset(); state = 'run'; }
+});
+canvas.addEventListener('pointerdown', (e) => { e.preventDefault(); flip(); });
+window.__gravityFlip = { flip, reset, getState: () => ({ state, gravity, shipY, speed, dist, stars }) };
+</script>
+</body>
+</html>
